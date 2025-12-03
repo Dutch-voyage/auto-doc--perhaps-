@@ -26,6 +26,8 @@ import mimetypes
 sys.path.append('.')
 
 from tag_manager import TagManager, Tag
+from terminal_component import render_terminal_tab
+from interactive_terminal import render_interactive_claude_terminal, render_interactive_python_terminal, InteractiveTerminal
 
 # Configuration
 PAGE_CONFIG = {
@@ -64,7 +66,7 @@ class WebUI:
         # Main content area
         page = st.sidebar.selectbox(
             "Navigation",
-            ["📋 Tags", "🔍 Search", "📄 Documents", "📊 Analytics", "📖 Reader"],
+            ["📋 Tags", "🔍 Search", "📄 Documents", "📊 Analytics", "📖 Reader", "💻 Terminal"],
             index=0
         )
 
@@ -88,6 +90,8 @@ class WebUI:
             self.analytics_page()
         elif page == "📖 Reader":
             self.reader_page()
+        elif page == "💻 Terminal":
+            self.terminal_page()
 
     def sidebar(self):
         """Sidebar configuration and info"""
@@ -819,6 +823,138 @@ class WebUI:
                 )
         except Exception as e:
             st.error(f"❌ Export error: {e}")
+
+    def terminal_page(self):
+        """Terminal page for system operations"""
+
+        st.markdown("## 💻 Terminal Interface")
+        st.markdown("*Execute system commands and run interactive applications*")
+
+        # Terminal mode selection
+        terminal_mode = st.radio(
+            "Select Terminal Mode:",
+            ["🔧 Standard Terminal", "🚀 Interactive Terminal"],
+            key="terminal_mode",
+            help="Standard Terminal: Safe command execution. Interactive Terminal: Full interactive sessions with real-time output."
+        )
+
+        if terminal_mode == "🔧 Standard Terminal":
+            # Standard terminal component
+            render_terminal_tab()
+
+        elif terminal_mode == "🚀 Interactive Terminal":
+            # Interactive terminal with real-time sessions
+            self.render_interactive_terminal_options()
+
+    def render_interactive_terminal_options(self):
+        """Render interactive terminal application selection"""
+
+        st.markdown("### 🚀 Interactive Applications")
+        st.markdown("*Full-featured terminal with real-time output and complete functionality*")
+
+        # Application selection
+        app_selection = st.selectbox(
+            "Select Application:",
+            ["🤖 Claude Code", "🐍 Python REPL", "🐚 Bash Shell", "🟢 Node.js REPL"],
+            key="interactive_app_selection",
+            help="Choose the application you want to run interactively"
+        )
+
+        # Terminal server status
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.markdown("**📊 Server Status**")
+
+            # Try to check if server is running
+            try:
+                import requests
+                import socket
+
+                # Check if port 8765 is open
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                result = sock.connect_ex(('localhost', 8765))
+                sock.close()
+
+                if result == 0:
+                    st.success("✅ Terminal server is running on port 8765")
+                    server_status = "running"
+                else:
+                    st.warning("⚠️ Terminal server is not running")
+                    server_status = "stopped"
+
+            except Exception as e:
+                st.error("❌ Error checking server status")
+                server_status = "unknown"
+
+        with col2:
+            if server_status != "running":
+                st.markdown("**🚀 Start Server**")
+                if st.button("🔧 Start Terminal Server", key="start_server", help="Start the WebSocket terminal server"):
+                    st.info("""
+                    **To start the terminal server, run this command in a separate terminal:**
+
+                    ```bash
+                    cd /home/yyx/data_management/material_collection/web_ui_env
+                    uv sync --extra interactive-terminal
+                    python terminal_server.py
+                    ```
+
+                    The server will start on port 8765 and you'll see "Terminal server started successfully!"
+                    """)
+            else:
+                st.markdown("**🎉 Ready to Connect!**")
+                st.success("Server is ready for interactive sessions")
+
+        # Render the selected interactive terminal
+        if server_status == "running":
+            st.markdown("---")
+
+            if app_selection == "🤖 Claude Code":
+                render_interactive_claude_terminal()
+
+            elif app_selection == "🐍 Python REPL":
+                render_interactive_python_terminal()
+
+            elif app_selection == "🐚 Bash Shell":
+                terminal = InteractiveTerminal()
+                terminal.render_interactive_terminal("Bash Shell", "bash")
+
+            elif app_selection == "🟢 Node.js REPL":
+                terminal = InteractiveTerminal()
+                terminal.render_interactive_terminal("Node.js REPL", "node")
+
+            # Session information
+            with st.expander("📋 Session Information", expanded=False):
+                st.markdown("""
+                **Interactive Terminal Features:**
+
+                - **🔌 Real-time Connection**: WebSocket-based bidirectional communication
+                - **📱 Full Functionality**: Complete application features including tab completion, history, etc.
+                - **🔄 Live Output**: See terminal output immediately as it appears
+                - **💻 Authentic Experience**: Real terminal with xterm.js emulation
+                - **🔒 Safe Environment**: Isolated sessions with proper cleanup
+
+                **Keyboard Shortcuts:**
+                - **Enter**: Execute command
+                - **Tab**: Auto-completion (if supported by application)
+                - **Arrow Up/Down**: Command history (if supported by application)
+                - **Ctrl+C**: Interrupt current command (if supported)
+                """)
+
+                if app_selection == "🤖 Claude Code":
+                    st.markdown("""
+                    **Claude Code Specific Features:**
+
+                    - **🤖 AI Assistant**: Full Claude Code functionality
+                    - **📁 File Operations**: Edit, create, manage files
+                    - **🔍 Code Analysis**: Code review and suggestions
+                    - **🛠️ Development Tools**: Complete development workflow
+                    - **💬 Interactive Chat**: Natural language interaction with Claude
+                    """)
+        else:
+            st.warning("⚠️ Please start the terminal server first to use interactive features")
 
 def main():
     """Main entry point"""
