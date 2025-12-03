@@ -1,0 +1,8 @@
+# Web UI Requirements for Tag Management System
+streamlit>=1.28.0
+pandas>=1.5.0
+python-multipart>=0.0.6
+aiofiles>=22.1.0
+watchdog>=3.0.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.20.0
