@@ -17,9 +17,15 @@ import pty
 import select
 import errno
 import logging
+import fcntl
+import termios
+import struct
 from typing import Set, Dict, Any, Optional
 from websockets.server import WebSocketServerProtocol
 import tempfile
+
+# Import settings manager
+from settings_manager import settings_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,9 +37,12 @@ class TerminalSession:
     def __init__(self, session_id: str, command: str, working_dir: str = None, cols: int = 80, rows: int = 24):
         self.session_id = session_id
         self.command = command
-        self.working_dir = working_dir or '/home/yyx/data_management/material_collection'
+        # Load default working directory from settings
+        self.working_dir = working_dir or settings_manager.get_setting("terminal", "default_working_dir")
         self.process = None
         self.pty_fd = None
+        self.master_fd = None  # Master end of PTY
+        self.slave_fd = None   # Slave end of PTY
         self.start_time = time.time()
         self.buffer = []
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
@@ -44,16 +53,21 @@ class TerminalSession:
     async def start(self):
         """Start the terminal session with proper PTY"""
         try:
-            # Use script command with proper terminal size for interactive apps
-            cmd = [
-                'script',
-                '-q',  # Quiet mode
-                '/dev/null',  # Output to nowhere (we handle it ourselves)
-                '-c',  # Execute command
-                f'export COLUMNS={self.cols} LINES={self.rows} TERM=xterm-256color && cd {self.working_dir} && {self.command}'
-            ]
+            # Create PTY
+            self.master_fd, self.slave_fd = pty.openpty()
 
-            # Set up environment with terminal size
+            # Set terminal size
+            self._set_pty_size(self.master_fd, self.cols, self.rows)
+
+            # Set non-blocking mode
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, os.O_NONBLOCK)
+
+            # Prepare command and environment
+            if self.command.strip() in ['bash', '/bin/bash']:
+                cmd = ['/bin/bash', '-i']
+            else:
+                cmd = self.command.split()
+
             env = os.environ.copy()
             env.update({
                 'COLUMNS': str(self.cols),
@@ -61,100 +75,153 @@ class TerminalSession:
                 'TERM': 'xterm-256color'
             })
 
-            # Start the process
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=False,  # Binary mode for proper PTY handling
-                bufsize=0,   # Unbuffered for real-time output
-                cwd=self.working_dir,
-                env=env,
-                preexec_fn=os.setsid  # Create new session group
-            )
+            # Fork and create process
+            pid = os.fork()
 
-            self.is_active = True
-            logger.info(f"Started terminal session {self.session_id}: {self.command} ({self.cols}x{self.rows})")
+            if pid == 0:  # Child process
+                # Set up slave PTY
+                os.setsid()
 
-            # Start output reader
-            asyncio.create_task(self._read_output())
+                # Make slave PTY the controlling terminal
+                os.dup2(self.slave_fd, 0)  # stdin
+                os.dup2(self.slave_fd, 1)  # stdout
+                os.dup2(self.slave_fd, 2)  # stderr
 
-            return True
+                # Close master FD in child
+                os.close(self.master_fd)
+
+                # Close slave FD after dup
+                os.close(self.slave_fd)
+
+                # Change to working directory
+                if self.working_dir:
+                    os.chdir(self.working_dir)
+
+                # Execute command
+                try:
+                    os.execve(cmd[0], cmd, env)
+                except OSError as e:
+                    logger.error(f"Failed to exec {cmd[0]}: {e}")
+                    os._exit(1)
+
+            else:  # Parent process
+                # Store the child process PID
+                self.process = pid
+
+                # Close slave FD in parent
+                if self.slave_fd is not None:
+                    try:
+                        os.close(self.slave_fd)
+                    except:
+                        pass
+                    self.slave_fd = None
+
+                self.is_active = True
+                logger.info(f"Started terminal session {self.session_id}: {self.command} ({self.cols}x{self.rows}) with PID {pid}")
+
+                # Start output reader
+                asyncio.create_task(self._read_output())
+
+                return True
 
         except Exception as e:
             logger.error(f"Failed to start session {self.session_id}: {e}")
+            # Clean up on failure
+            if self.master_fd is not None:
+                try:
+                    os.close(self.master_fd)
+                except:
+                    pass
+            if self.slave_fd is not None:
+                try:
+                    os.close(self.slave_fd)
+                except:
+                    pass
             return False
 
+    def _set_pty_size(self, fd, cols, rows):
+        """Set PTY terminal size"""
+        try:
+            # TIOCSWINSZ ioctl call to set window size
+            # Format: 4 unsigned short values (rows, cols, x_pixels, y_pixels)
+            s = struct.pack("HHHH", rows, cols, 0, 0)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, s)
+        except Exception as e:
+            logger.warning(f"Could not set PTY size: {e}")
+
     async def _read_output(self):
-        """Read output from the terminal process continuously and broadcast to clients"""
-        logger.info(f"Starting output reader for session {self.session_id}")
+        """Read output from the PTY continuously and broadcast to clients"""
+        logger.info(f"Starting PTY output reader for session {self.session_id}")
 
         read_count = 0
         try:
-            while self.is_active and self.process and self.process.poll() is None:
+            while self.is_active and self.master_fd is not None:
                 try:
-                    # Use a longer timeout and different approach for continuous reading
-                    # Try reading with a longer timeout to capture more data
-                    try:
-                        # First, try to read any available data without blocking too long
-                        data = await asyncio.wait_for(
-                            asyncio.get_event_loop().run_in_executor(
-                                None, self.process.stdout.read, 8192
-                            ),
-                            timeout=0.5
-                        )
+                    # Use select to check if data is available
+                    ready, _, _ = select.select([self.master_fd], [], [], 0.1)
 
-                        if data:
-                            read_count += 1
-                            # Decode binary data properly
-                            try:
-                                text = data.decode('utf-8', errors='replace')
-                            except:
-                                text = data.decode('latin-1', errors='replace')
+                    if ready:
+                        # Data is available, read it
+                        try:
+                            data = os.read(self.master_fd, 8192)
 
-                            # Log output activity (less frequent to avoid flooding)
-                            if read_count % 5 == 0 or text.strip():
-                                logger.info(f"Read output #{read_count} from {self.session_id}: {len(data)} bytes, preview: {repr(text[:100])}")
+                            if data:
+                                read_count += 1
+                                # Decode binary data properly
+                                try:
+                                    text = data.decode('utf-8', errors='replace')
+                                except:
+                                    text = data.decode('latin-1', errors='replace')
 
-                            # Send output message immediately
-                            message = {
-                                'type': 'output',
-                                'data': text,
-                                'timestamp': time.time(),
-                                'session_id': self.session_id
-                            }
+                                # Log output activity (less frequent to avoid flooding)
+                                if read_count % 10 == 0 or (text.strip() and len(text.strip()) > 5):
+                                    logger.info(f"Read output #{read_count} from {self.session_id}: {len(data)} bytes, preview: {repr(text[:50])}")
 
-                            # Store in buffer
-                            self.buffer.append(message)
-                            if len(self.buffer) > 1000:  # Limit buffer size
-                                self.buffer.pop(0)
+                                # Send output message immediately
+                                message = {
+                                    'type': 'output',
+                                    'data': text,
+                                    'timestamp': time.time(),
+                                    'session_id': self.session_id
+                                }
 
-                            # Broadcast to all connected clients
-                            await self._broadcast(message)
-                            if len(self.clients) > 0:
-                                logger.debug(f"Broadcast output to {len(self.clients)} clients for session {self.session_id}")
-                        else:
-                            # No data, small delay before trying again
-                            await asyncio.sleep(0.05)
+                                # Store in buffer
+                                self.buffer.append(message)
+                                if len(self.buffer) > 1000:  # Limit buffer size
+                                    self.buffer.pop(0)
 
-                    except asyncio.TimeoutError:
-                        # No data available within timeout, continue loop
-                        await asyncio.sleep(0.01)
+                                # Broadcast to all connected clients
+                                await self._broadcast(message)
+                                if len(self.clients) > 0:
+                                    logger.debug(f"Broadcast output to {len(self.clients)} clients for session {self.session_id}")
+
+                        except OSError as e:
+                            if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
+                                # No data available right now
+                                await asyncio.sleep(0.01)
+                            else:
+                                logger.error(f"Error reading from PTY {self.session_id}: {e}")
+                                await asyncio.sleep(0.1)
+                    else:
+                        # No data available, small delay
+                        await asyncio.sleep(0.05)
 
                 except Exception as e:
-                    logger.error(f"Error reading output from {self.session_id}: {e}")
+                    logger.error(f"Error in PTY select/read loop for {self.session_id}: {e}")
                     await asyncio.sleep(0.1)
 
-                # Check if process ended
-                if self.process.poll() is not None:
-                    logger.info(f"Process {self.session_id} ended with code {self.process.returncode}")
+                # Check if child process is still alive
+                try:
+                    # Send signal 0 to check if process is alive
+                    os.kill(self.process, 0)
+                except (OSError, ProcessLookupError):
+                    logger.info(f"Process {self.session_id} ended")
                     break
 
         except Exception as e:
-            logger.error(f"Fatal error in output reader for {self.session_id}: {e}")
+            logger.error(f"Fatal error in PTY output reader for {self.session_id}: {e}")
         finally:
-            logger.info(f"Output reader for {self.session_id} stopped after {read_count} reads")
+            logger.info(f"PTY output reader for {self.session_id} stopped after {read_count} reads")
 
     async def resize(self, cols: int, rows: int):
         """Resize the terminal"""
@@ -163,35 +230,34 @@ class TerminalSession:
                 old_cols, old_rows = self.cols, self.rows
                 self.cols = cols
                 self.rows = rows
-                logger.info(f"Resized terminal {self.session_id} from {old_cols}x{old_rows} to {cols}x{rows}")
+                logger.info(f"Resized PTY {self.session_id} from {old_cols}x{old_rows} to {cols}x{rows}")
+
+                # Set PTY size
+                if self.master_fd:
+                    self._set_pty_size(self.master_fd, cols, rows)
 
                 # Send SIGWINCH to process to notify of resize
-                if self.process and self.process.pid:
+                if self.process:
                     try:
-                        # Send signal to process group
-                        os.killpg(os.getpgid(self.process.pid), signal.SIGWINCH)
+                        os.kill(self.process, signal.SIGWINCH)
                     except (ProcessLookupError, PermissionError):
-                        try:
-                            # Fallback: kill process directly
-                            os.kill(self.process.pid, signal.SIGWINCH)
-                        except:
-                            pass
+                        # Process may have ended
+                        pass
         except Exception as e:
-            logger.error(f"Error resizing terminal {self.session_id}: {e}")
+            logger.error(f"Error resizing PTY {self.session_id}: {e}")
 
     async def send_input(self, data: str):
-        """Send input to the terminal process"""
+        """Send input to the terminal process via PTY"""
         try:
-            if self.process and self.process.stdin and not self.process.stdin.closed:
-                # Convert to bytes for binary mode
+            if self.master_fd is not None and self.is_active:
+                # Convert string to bytes for PTY
                 if isinstance(data, str):
                     data_bytes = data.encode('utf-8')
                 else:
                     data_bytes = data
 
-                # Write binary data
-                self.process.stdin.write(data_bytes)
-                self.process.stdin.flush()
+                # Write to PTY master file descriptor
+                os.write(self.master_fd, data_bytes)
 
                 # Echo input back to clients
                 message = {
@@ -202,8 +268,20 @@ class TerminalSession:
                 }
                 await self._broadcast(message)
 
+        except BrokenPipeError:
+            # Process ended, this is normal behavior
+            logger.info(f"Session {self.session_id} process ended (broken pipe)")
+            self.is_active = False
+        except OSError as e:
+            if e.errno == errno.EPIPE:  # Broken pipe
+                logger.info(f"Session {self.session_id} process ended")
+                self.is_active = False
+            elif e.errno == errno.EAGAIN:  # Would block
+                pass  # Try again later
+            else:
+                logger.error(f"OS error sending input to {self.session_id}: {e}")
         except Exception as e:
-            logger.error(f"Error sending input: {e}")
+            logger.error(f"Error sending input to {self.session_id}: {e}")
 
     async def _broadcast(self, message: dict):
         """Broadcast message to all connected clients"""
@@ -235,21 +313,39 @@ class TerminalSession:
         self.clients.discard(client)
 
     async def stop(self):
-        """Stop the terminal session"""
+        """Stop the terminal session and clean up PTY"""
         self.is_active = False
 
+        # Close PTY file descriptors
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except Exception as e:
+                logger.warning(f"Error closing master PTY: {e}")
+            self.master_fd = None
+
+        if self.slave_fd is not None:
+            try:
+                os.close(self.slave_fd)
+            except Exception as e:
+                logger.warning(f"Error closing slave PTY: {e}")
+            self.slave_fd = None
+
+        # Terminate the process
         if self.process:
             try:
                 # Send SIGTERM for graceful shutdown
-                self.process.terminate()
+                os.kill(self.process, signal.SIGTERM)
 
                 # Wait a bit for graceful shutdown
                 await asyncio.sleep(2)
 
                 # Force kill if still running
-                if self.process.poll() is None:
-                    self.process.kill()
-                    await asyncio.sleep(1)
+                try:
+                    os.kill(self.process, 0)  # Check if still alive
+                    os.kill(self.process, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass  # Process already ended
 
             except Exception as e:
                 logger.error(f"Error stopping process: {e}")
@@ -259,12 +355,22 @@ class TerminalSession:
 
     def get_status(self) -> dict:
         """Get session status"""
+        process_running = False
+        if self.process:
+            try:
+                # Check if process is still alive
+                os.kill(self.process, 0)
+                process_running = True
+            except (ProcessLookupError, OSError):
+                process_running = False
+
         return {
             'session_id': self.session_id,
             'command': self.command,
             'start_time': self.start_time,
             'is_active': self.is_active,
-            'process_running': self.process and self.process.poll() is None,
+            'process_running': process_running,
+            'pty_attached': self.master_fd is not None,
             'client_count': len(self.clients),
             'buffer_size': len(self.buffer)
         }
@@ -404,7 +510,7 @@ class TerminalServer:
 
         return await websockets.serve(
             self.client_handler,
-            "localhost",
+            "0.0.0.0",
             self.port,
             ping_interval=20,
             ping_timeout=10

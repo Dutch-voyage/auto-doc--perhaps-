@@ -161,7 +161,7 @@ class InteractiveTerminal:
         let ws = null;
         let sessionId = '{session_id}';
         let isConnected = false;
-        let command = '{command or "/home/yyx/.nvm/versions/node/v22.18.0/bin/claude"}';
+        let command = '{command or "bash"}';
         let terminal = null;
         let fitAddon = null;
 
@@ -470,7 +470,8 @@ class InteractiveTerminal:
 
         if command is None:
             if app_name == "Claude Code":
-                command = "/home/yyx/.nvm/versions/node/v22.18.0/bin/claude"
+                # Will be set by the specific function above
+                command = "bash"
             elif app_name == "Python REPL":
                 command = "python3"
             elif app_name == "Bash":
@@ -565,7 +566,8 @@ class InteractiveTerminal:
 def render_interactive_claude_terminal():
     """Render interactive Claude Code terminal"""
     terminal = InteractiveTerminal()
-    terminal.render_interactive_terminal("Claude Code", "/home/yyx/.nvm/versions/node/v22.18.0/bin/claude")
+    # Use simple bash command - let PTY handle the interactive environment
+    terminal.render_interactive_terminal("Claude Code", "bash")
 
 def render_interactive_python_terminal():
     """Render interactive Python terminal"""

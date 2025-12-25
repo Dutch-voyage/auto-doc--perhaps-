@@ -28,6 +28,8 @@ sys.path.append('.')
 from tag_manager import TagManager, Tag
 from terminal_component import render_terminal_tab
 from interactive_terminal import render_interactive_claude_terminal, render_interactive_python_terminal, InteractiveTerminal
+from file_editor import FileEditor
+from settings_manager import settings_manager
 
 # Configuration
 PAGE_CONFIG = {
@@ -52,6 +54,8 @@ class WebUI:
             st.session_state.search_history = []
         if 'selected_document' not in st.session_state:
             st.session_state.selected_document = None
+        if 'current_page' not in st.session_state:
+            st.session_state.current_page = "📋 Tags"
 
     def run(self):
         """Main application runner"""
@@ -66,9 +70,13 @@ class WebUI:
         # Main content area
         page = st.sidebar.selectbox(
             "Navigation",
-            ["📋 Tags", "🔍 Search", "📄 Documents", "📊 Analytics", "📖 Reader", "💻 Terminal"],
-            index=0
+            ["📋 Tags", "🔍 Search", "📄 Documents", "📊 Analytics", "📖 Reader", "📂 File Editor", "💻 Terminal", "⚙️ Settings"],
+            index=["📋 Tags", "🔍 Search", "📄 Documents", "📊 Analytics", "📖 Reader", "📂 File Editor", "💻 Terminal", "⚙️ Settings"].index(st.session_state.current_page)
         )
+
+        # Update session state if page changed via selectbox
+        if page != st.session_state.current_page:
+            st.session_state.current_page = page
 
         # Show notification if document is selected but not on Reader page
         if st.session_state.selected_document and page != "📖 Reader":
@@ -90,8 +98,12 @@ class WebUI:
             self.analytics_page()
         elif page == "📖 Reader":
             self.reader_page()
+        elif page == "📂 File Editor":
+            self.file_editor_page()
         elif page == "💻 Terminal":
             self.terminal_page()
+        elif page == "⚙️ Settings":
+            self.settings_page()
 
     def sidebar(self):
         """Sidebar configuration and info"""
@@ -165,7 +177,7 @@ class WebUI:
             name = st.text_input("Tag Name*")
             category = st.selectbox(
                 "Category*",
-                ["Hardware_Topics", "RL_Training_phases", "Scenarios", "Auto-detected", "Other"]
+                ["Hardware_Topics", "RL_Training_phases", "Scenarios", "Other"]
             )
 
             if category == "Other":
@@ -378,6 +390,7 @@ class WebUI:
                             with col2:
                                 if st.button(f"📖 Read", key=f"read_{i}"):
                                     st.session_state.selected_document = result['path']
+                                    st.session_state.current_page = "📖 Reader"
                                     st.rerun()
 
                 else:
@@ -436,8 +449,9 @@ class WebUI:
 
             # For our setup, images are now accessible via local images/ symlink
             if original_path.startswith('./images/') or original_path.startswith('images/'):
-                # Path is already correct - keep as is
-                return f"![{alt_text}]({original_path})"
+                # Normalize to just images/ without ./
+                filename = Path(original_path).name
+                return f"![{alt_text}](images/{filename})"
             elif original_path.startswith('./'):
                 # Handle other relative paths - assume they're images
                 filename = Path(original_path).name
@@ -467,6 +481,97 @@ class WebUI:
         fixed_content = re.sub(pattern, replace_image_path, content)
 
         return fixed_content
+
+    def render_markdown_with_images(self, content: str, doc_path: str):
+        """Render markdown with properly displayed images using st.image()"""
+        import re
+
+        # Find all image references
+        pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        images = re.finditer(pattern, content)
+
+        # Get the base path for images (script is already in web_ui_env/)
+        images_dir = Path("images").resolve()
+
+        # Split content by image references and render
+        last_end = 0
+        for match in images:
+            # Display text before this image
+            text_before = content[last_end:match.start()]
+            if text_before.strip():
+                st.markdown(text_before)
+
+            # Extract image info
+            alt_text = match.group(1)
+            original_path = match.group(2)
+
+            # Handle absolute URLs and data URIs - display with st.image()
+            if original_path.startswith(('http://', 'https://')):
+                try:
+                    st.image(original_path, caption=alt_text, use_container_width=True)
+                except Exception as e:
+                    # If loading fails, show as markdown with clickable link
+                    st.info(f"🖼️ **{alt_text}**")
+                    st.markdown(f"[🔗 Open image in new tab]({original_path})")
+                last_end = match.end()
+                continue
+            elif original_path.startswith('data:'):
+                # Data URIs - keep in markdown
+                st.markdown(match.group(0))
+                last_end = match.end()
+                continue
+
+            # Resolve the image path
+            image_path = None
+            if original_path.startswith('./images/') or original_path.startswith('images/'):
+                filename = Path(original_path).name
+                image_path = images_dir / filename
+            elif original_path.startswith('./'):
+                # Try to resolve relative to document
+                doc_dir = Path(doc_path).parent
+                filename = Path(original_path).name
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
+                    image_path = images_dir / filename
+                else:
+                    # Keep as markdown if not an image
+                    st.markdown(match.group(0))
+                    last_end = match.end()
+                    continue
+            else:
+                # Try to resolve relative to document
+                try:
+                    doc_dir = Path(doc_path).parent
+                    abs_path = (doc_dir / original_path).resolve()
+                    if 'efficient_RL_systems/summaries' in str(abs_path):
+                        filename = abs_path.name
+                        image_path = images_dir / filename
+                    else:
+                        st.markdown(match.group(0))
+                        last_end = match.end()
+                        continue
+                except:
+                    st.markdown(match.group(0))
+                    last_end = match.end()
+                    continue
+
+            # Display the image if path exists
+            if image_path and image_path.exists():
+                try:
+                    st.image(str(image_path), caption=alt_text, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed to load image: {alt_text}")
+                    st.code(f"Path: {image_path}")
+            else:
+                st.warning(f"Image not found: `{alt_text}`")
+                if image_path:
+                    st.code(f"Expected path: {image_path}")
+
+            last_end = match.end()
+
+        # Display any remaining content after the last image
+        remaining = content[last_end:]
+        if remaining.strip():
+            st.markdown(remaining)
 
     def documents_page(self):
         """Document listing and management page"""
@@ -523,6 +628,7 @@ class WebUI:
                             with col2:
                                 if st.button("📖 Read", key=f"doc_read_{doc['path']}"):
                                     st.session_state.selected_document = doc['path']
+                                    st.session_state.current_page = "📖 Reader"
                                     st.rerun()
 
                                 if st.button("🔄 Re-sync", key=f"doc_sync_{doc['path']}"):
@@ -633,9 +739,8 @@ class WebUI:
                 st.markdown(tags_html)
                 st.markdown("---")
 
-            # Fix image paths and display content
-            fixed_content = self.fix_image_paths(content, doc_path)
-            st.markdown(fixed_content)
+            # Display content with images
+            self.render_markdown_with_images(content, doc_path)
 
             # Action buttons
             col1, col2, col3 = st.columns([1, 1, 1])
@@ -824,6 +929,20 @@ class WebUI:
         except Exception as e:
             st.error(f"❌ Export error: {e}")
 
+    def file_editor_page(self):
+        """File editor page with comprehensive file management"""
+        try:
+            # Initialize File Editor
+            base_path = "/home/yyx/data_management/material_collection"
+            file_editor = FileEditor(base_path)
+
+            # Render the file editor interface
+            file_editor.render()
+
+        except Exception as e:
+            st.error(f"❌ File Editor error: {e}")
+            st.code(f"Error details: {str(e)}")
+
     def terminal_page(self):
         """Terminal page for system operations"""
 
@@ -912,6 +1031,20 @@ class WebUI:
             st.markdown("---")
 
             if app_selection == "🤖 Claude Code":
+                st.info("""
+                **🤖 Claude Code Persistent Bash Session**
+
+                This terminal starts a persistent bash session. To start Claude Code, run:
+                ```bash
+                /home/yyx/.nvm/versions/node/v22.18.0/bin/claude
+                ```
+
+                **Benefits:**
+                - **Ctrl+C** won't kill the entire session - only the current command
+                - **Tab completion** works in bash
+                - **Persistent session** - use multiple commands
+                - **Full bash functionality** available
+                """)
                 render_interactive_claude_terminal()
 
             elif app_selection == "🐍 Python REPL":
@@ -955,6 +1088,10 @@ class WebUI:
                     """)
         else:
             st.warning("⚠️ Please start the terminal server first to use interactive features")
+
+    def settings_page(self):
+        """Settings configuration page"""
+        settings_manager.render_settings_page()
 
 def main():
     """Main entry point"""
