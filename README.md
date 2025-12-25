@@ -121,7 +121,7 @@ User: outlines.md + Requirements.md → LLM: Initial summaries
 - **Purpose**: Production-ready web interface for tag management and document search
 - **Technology**: Streamlit + uv for modern Python development
 - **Features**: Tag management, search interface, document reader, analytics dashboard
-- **Quick Start**: `cd web_ui_env && python start_demo.py`
+- **Quick Start**: `cd web_ui_env && uv run streamlit run web_ui.py`
 
 ### **[📋 Implementation Documentation](IMPLEMENTATION_DOCUMENTATION.md)**
 - **Purpose**: Technical documentation of the web UI system
