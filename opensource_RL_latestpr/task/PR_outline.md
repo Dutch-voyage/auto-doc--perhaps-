@@ -1,4 +1,4 @@
 - [x] [slime](https://github.com/THUDM/slime)
-- [ ] [verl](https://github.com/volcengine/verl)
-- [ ] [roll](https://github.com/alibaba/ROLL)
-- [ ] [areal](https://github.com/inclusionAI/AReaL)
+- [x] [verl](https://github.com/volcengine/verl) - Completed 2026-01-08
+- [x] [roll](https://github.com/alibaba/ROLL)
+- [x] [areal](https://github.com/inclusionAI/AReaL) - Completed 2026-01-08
