@@ -1,0 +1,4 @@
+- [x] [slime](https://github.com/THUDM/slime)
+- [ ] [verl](https://github.com/volcengine/verl)
+- [ ] [roll](https://github.com/alibaba/ROLL)
+- [ ] [areal](https://github.com/inclusionAI/AReaL)
